@@ -1,0 +1,368 @@
+---
+title: "Feasibility PPG"
+author: "Kars"
+date: "2025-08-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library("ggpubr")
+library(cowplot)
+library(dplyr)
+library(sandwich)
+library(lmtest)
+library(irr)
+options(scipen = 9)
+```
+
+## Load feasibility database
+```{r}
+df <- read.csv(file='Path/to/your/feasibility_database.csv', header = TRUE, sep = ",");
+
+```
+
+
+## Inclusion exclusion criteria
+```{R}
+df_incl <- subset(df, exclusion_rhythm == 0 & Incl_wear_time_week0 == 1 & Incl_hq_time0 == 1 & Incl_wear_time_week1 == 1 & Incl_hq_time1 ==1 & training_set==0)
+```
+
+## Regression model for only included data
+
+## Create dataframe for all data --> inclusions applied at later stage!
+```{R}
+HR_rest_d_week0 <- df_incl$HR_rest_day_week0
+HR_rest_d_week1 <- df_incl$HR_rest_day_week1
+HR_rest_n_week0 <- df_incl$HR_rest_night_week0
+HR_rest_n_week1 <- df_incl$HR_rest_night_week1
+HR_max_week0 <- df_incl$HR_max_day_week0
+HR_max_week1 <- df_incl$HR_max_day_week1
+SCOPA_AUT <- df_incl$ScopaAut_tot
+Age <- df_incl$Age
+Sex <- factor(df_incl$Gender)
+Sex <- relevel(Sex, ref = "1")
+Beta_use <- factor(df_incl$beta_user)
+PASE <- df_incl$PASE_score
+
+rel_data <- data.frame(HR_rest_d_week0, HR_rest_d_week1, HR_rest_n_week0, HR_rest_n_week1, HR_max_week0, HR_max_week1, Age, Sex, SCOPA_AUT, Beta_use, PASE)
+```
+# Recalculate HR parameters based on male, mean age and no medication use (to be implemented) --> write a function to do this for each variable seperately!!
+```{R}
+adjust_variables <- function(data, dependent_vars, age_var = "Age", sex_var = "Sex", scopa_var = "SCOPA_AUT", 
+                             betablocker_var = "Beta_use", pase_var = "PASE") {
+  adjusted_data <- data
+  
+  for (dependent_var in dependent_vars) {
+    # Run the linear regression model
+    model <- lm(reformulate(c(scopa_var, age_var, sex_var, betablocker_var, pase_var), response = dependent_var), data = adjusted_data)
+    coefficients <- coef(model)
+
+    # Adjust the dependent variable for Sex
+    adjusted_data[[dependent_var]][adjusted_data[[sex_var]] == 2] <- adjusted_data[[dependent_var]][adjusted_data[[sex_var]] == 2] - coefficients[4]
+    
+    # Calculate mean age and mean PASE
+    mean_age <- mean(adjusted_data[[age_var]], na.rm = TRUE)
+    mean_pase <- mean(adjusted_data[[pase_var]], na.rm = TRUE)
+
+    # Adjust the dependent variable for Age
+    adjusted_data[[dependent_var]] <- adjusted_data[[dependent_var]] - (adjusted_data[[age_var]] - mean_age) * coefficients[3]
+    
+    # Adjust the dependent variable for PASE
+    adjusted_data[[dependent_var]] <- adjusted_data[[dependent_var]] - (adjusted_data[[pase_var]] - mean_pase) * coefficients[6]
+
+    # Adjust the dependent variable for betablocker use
+    adjusted_data[[dependent_var]][adjusted_data[[betablocker_var]] == 1] <- adjusted_data[[dependent_var]][adjusted_data[[betablocker_var]] == 1] - coefficients[5]
+  }
+  
+  return(adjusted_data)
+}
+
+# Example usage:
+HR_params <- c("HR_rest_n_week0", "HR_rest_n_week1", "HR_rest_d_week0", "HR_rest_d_week1", "HR_max_week0", "HR_max_week1")
+rel_data_up <- adjust_variables(rel_data, HR_params)
+
+```
+
+## Create new df with updated data
+```{R}
+df_new <- df_incl
+df_new$HR_rest_day_week0_corr <- rel_data_up$HR_rest_d_week0
+df_new$HR_rest_day_week1_corr <- rel_data_up$HR_rest_d_week1
+df_new$HR_rest_night_week0_corr <- rel_data_up$HR_rest_n_week0
+df_new$HR_rest_night_week1_corr <- rel_data_up$HR_rest_n_week1
+df_new$HR_max_day_week0_corr <- rel_data_up$HR_max_week0
+df_new$HR_max_day_week1_corr <- rel_data_up$HR_max_week1
+
+```
+
+## Now create SCOPA plots
+```{R}
+# Function to add beta coefficient and confidence intervals annotations outside of the plot
+add_beta_ci_outside <- function(plot, x, y, label) {
+  plot + 
+    geom_text(aes(x = x, y = y, label = label), color = "black", vjust = -1, hjust = 1, size = 4) +
+    coord_cartesian(clip = "off")
+}
+
+# Fit multivariate regression models
+model1 <- lm(HR_rest_night_week1 ~ ScopaAut_tot + Age + Gender + Beta_use + PASE, data = df_new)
+model2 <- lm(HR_rest_day_week1 ~ ScopaAut_tot + Age + Gender + Beta_use + PASE, data = df_new)
+model3 <- lm(HR_max_day_week1 ~ ScopaAut_tot + Age + Gender + Beta_use + PASE, data = df_new)
+
+# Extract beta coefficients and confidence intervals for aut_tot
+beta1 <- coef(model1)["ScopaAut_tot"]
+ci1 <- confint(model1)["ScopaAut_tot", ]
+
+beta2 <- coef(model2)["ScopaAut_tot"]
+ci2 <- confint(model2)["ScopaAut_tot", ]
+
+beta3 <- coef(model3)["ScopaAut_tot"]
+ci3 <- confint(model3)["ScopaAut_tot", ]
+
+# Create scatter plots
+p1 <- ggscatter(data = df_new, x = "ScopaAut_tot", y = "HR_rest_night_week1_corr", add = "reg.line", conf.int = TRUE,
+                cor.coef = FALSE, cor.method = "pearson",size = 1.5) + labs(x = "SCOPA-AUT", y = expression("Resting pulse rate night [min"^-1*"]"))
+
+p2 <- ggscatter(data = df_new, x = "ScopaAut_tot", y = "HR_rest_day_week1_corr", add = "reg.line", conf.int = TRUE,
+                cor.coef = FALSE, cor.method = "pearson", size = 1.5) + labs(x = "SCOPA-AUT", y = expression("Resting pulse rate day [min"^-1*"]"))
+
+p3 <- ggscatter(data = df_new, x = "ScopaAut_tot", y = "HR_max_day_week1_corr", add = "reg.line", conf.int = TRUE,
+                cor.coef = FALSE, cor.method = "pearson", size = 1.5) + labs(x = "SCOPA-AUT", y = expression("Maximum pulse rate [min"^-1*"]"))
+
+
+# Add beta coefficient and confidence intervals annotations outside of the plot
+p1 <- add_beta_ci_outside(p1, x = max(df_new$ScopaAut_tot, na.rm = TRUE), y = 96,  
+                          label = paste0("\U03B2 = ", sprintf("%.2f", beta1), " [", sprintf("%.2f", ci1[1]), ", ", sprintf("%.2f", ci1[2]), "]"))
+
+p2 <- add_beta_ci_outside(p2, x = max(df_new$ScopaAut_tot, na.rm = TRUE), y = 96, 
+                          label = paste0("\U03B2 = ", sprintf("%.2f", beta2), " [", sprintf("%.2f", ci2[1]), ", ", sprintf("%.2f", ci2[2]), "]"))
+
+p3 <- add_beta_ci_outside(p3, x = max(df_new$ScopaAut_tot, na.rm = TRUE), y = 172,
+label = paste0("\U03B2 = ", sprintf("%.2f", beta3), " [", sprintf("%.2f", ci3[1]), ", ", sprintf("%.2f", ci3[2]), "]"))
+
+
+
+# Adjust y-axis limits for subfigures and set ticks manually
+p1 <- p1 + coord_cartesian(ylim = c(40, 100)) + scale_y_continuous(breaks = seq(45, 95, by = 10))
+p2 <- p2 + coord_cartesian(ylim = c(40, 100)) + scale_y_continuous(breaks = seq(45, 95, by = 10))
+p3 <- p3 + coord_cartesian(ylim = c(50, 180)) + scale_y_continuous(breaks = seq(55, 175, by = 20))
+
+
+# Arrange plots in a grid
+plot_grid(p1, p2, p3, align = "hv", ncol = 3, nrow = 2)
+
+```
+
+### NOw perform OH+ vs OH- by loading the data
+
+```{r}
+df_oh_week0 <- read.csv(file='C:/Users/z863160/Documents/AI4P/PPG/Artikel feasibility/data/final database/20250806_ppp_oh_analysis_week0.csv', header = TRUE, sep = ",");
+df_oh_week1 <- read.csv(file='C:/Users/z863160/Documents/AI4P/PPG/Artikel feasibility/data/final database/20250806_ppp_oh_analysis_week1.csv', header = TRUE, sep = ",");
+
+```
+
+```{r}
+library(ggpubr)  # for ggboxplot
+library(cowplot) # for plot_grid
+
+rel_df <- df_oh_week1
+
+# Make sure BpOrthStatEval is a factor with levels "0" (No OH) and "1" (OH+)
+rel_df$BpOrthStatEval <- factor(rel_df$BpOrthStatEval, levels = c(0, 1), labels = c("OH-", "OH+"))
+
+# Fit linear models with BpOrthStatEval as factor
+model1 <- lm(modal_hr_night ~ BpOrthStatEval + Age + Gender + beta_user + PASE_score, data = rel_df)
+model2 <- lm(modal_hr_day ~ BpOrthStatEval + Age + Gender + beta_user + PASE_score, data = rel_df)
+model3 <- lm(max_hr_day ~ BpOrthStatEval + Age + Gender + beta_user + PASE_score, data = rel_df)
+
+# Extract beta and confidence intervals for BpOrthStatEvalOH+ (level 1)
+beta1 <- coef(model1)["BpOrthStatEvalOH+"]
+ci1 <- confint(model1)["BpOrthStatEvalOH+", ]
+
+beta2 <- coef(model2)["BpOrthStatEvalOH+"]
+ci2 <- confint(model2)["BpOrthStatEvalOH+", ]
+
+beta3 <- coef(model3)["BpOrthStatEvalOH+"]
+ci3 <- confint(model3)["BpOrthStatEvalOH+", ]
+
+# Function to add beta + CI annotation
+add_beta_ci_boxplot <- function(plot, y, label) {
+  plot + 
+    annotate("text", x = 1.5, y = y, label = label, hjust = 0.5, size = 4) +
+    coord_cartesian(clip = "off")
+}
+
+# Create boxplots with jitter points
+p1 <- ggboxplot(rel_df, x = "BpOrthStatEval", y = "modal_hr_night", fill = "BpOrthStatEval", palette = "npg") +
+  labs(x = "", y = expression("Resting pulse rate night [min"^-1*"]"))
+
+p2 <- ggboxplot(rel_df, x = "BpOrthStatEval", y = "modal_hr_day", fill = "BpOrthStatEval", palette = "jco") +
+  labs(x = "", y = expression("Resting pulse rate day [min"^-1*"]"))
+
+p3 <- ggboxplot(rel_df, x = "BpOrthStatEval", y = "max_hr_day", fill = "BpOrthStatEval", palette = "jco", outlier.shape = NA
+) +
+  labs(x = "", y = expression("Maximum pulse rate [min"^-1*"]"))
+
+# Add annotations
+p1 <- add_beta_ci_boxplot(p1, y = 96, label = paste0("\U03B2 = ", sprintf("%.2f", beta1), " [", sprintf("%.2f", ci1[1]), ", ", sprintf("%.2f", ci1[2]), "]"))
+p2 <- add_beta_ci_boxplot(p2, y = 96, label = paste0("\U03B2 = ", sprintf("%.2f", beta2), " [", sprintf("%.2f", ci2[1]), ", ", sprintf("%.2f", ci2[2]), "]"))
+p3 <- add_beta_ci_boxplot(p3, y = 172, label = paste0("\U03B2 = ", sprintf("%.2f", beta3), " [", sprintf("%.2f", ci3[1]), ", ", sprintf("%.2f", ci3[2]), "]"))
+
+# Adjust y-axis limits
+p1 <- p1 + coord_cartesian(ylim = c(40, 100)) + scale_y_continuous(breaks = seq(45, 95, by = 10))
+p2 <- p2 + coord_cartesian(ylim = c(40, 100)) + scale_y_continuous(breaks = seq(45, 95, by = 10))
+p3 <- p3 + coord_cartesian(ylim = c(50, 180)) + scale_y_continuous(breaks = seq(55, 175, by = 20))
+
+# Arrange all three plots in a grid
+plot_grid(p1, p2, p3, align = "hv", ncol = 3)
+
+```
+```{r}
+library(ggpubr)
+
+library(ggpubr)
+library(cowplot)
+
+# Prepare dataset
+df_new <- df_oh_week1
+df_new$BpOrthStatEval <- factor(df_new$BpOrthStatEval, levels = c(0, 1), labels = c("OH-", "OH+"))
+
+# Fit linear models adjusted for covariates
+model1 <- lm(modal_hr_night ~ BpOrthStatEval + Age + Gender + PASE_score + beta_user, data = df_new)
+model2 <- lm(modal_hr_day ~ BpOrthStatEval + Age + Gender + PASE_score + beta_user, data = df_new)
+model3 <- lm(max_hr_day ~ BpOrthStatEval + Gender + PASE_score + beta_user, data = df_new)
+
+# Function to add β + CI label
+add_beta_ci_boxplot <- function(plot, y, label) {
+  plot + annotate("text", x = 1.5, y = y, label = label, size = 2.5)
+}
+
+# Function to create boxplot with optional legend
+create_plot <- function(yvar, ylab, model, show_legend = FALSE) {
+  pval <- summary(model)$coefficients["BpOrthStatEvalOH+", "Pr(>|t|)"]
+  p <- ggboxplot(df_new, x = "BpOrthStatEval", y = yvar, 
+                 fill = "BpOrthStatEval", palette = "npg", alpha = 0.3, outlier.shape = NA) +
+    labs(x = "", y = ylab)
+
+  if (!show_legend) {
+    p <- p + guides(fill = "none")
+  }
+  
+  return(p)
+}
+
+# Extract beta and confidence intervals for BpOrthStatEvalOH+ (level 1)
+beta1 <- coef(model1)["BpOrthStatEvalOH+"]
+ci1 <- confint(model1)["BpOrthStatEvalOH+", ]
+
+beta2 <- coef(model2)["BpOrthStatEvalOH+"]
+ci2 <- confint(model2)["BpOrthStatEvalOH+", ]
+
+beta3 <- coef(model3)["BpOrthStatEvalOH+"]
+ci3 <- confint(model3)["BpOrthStatEvalOH+", ]
+
+# Create plots with β annotations
+p1 <- create_plot("modal_hr_night", expression("Resting pulse rate night [min"^-1*"]"), model1) + 
+  coord_cartesian(ylim = c(40, 100)) +
+  scale_y_continuous(breaks = seq(45, 95, by = 10)) +
+  annotate("text", x = 2, y = 96,
+           label = paste0("\u03B2 = ", sprintf("%.2f", beta1), " [", sprintf("%.2f", ci1[1]), ", ", sprintf("%.2f", ci1[2]), "]"),
+           size = 2.5)
+
+p2 <- create_plot("modal_hr_day", expression("Resting pulse rate day [min"^-1*"]"), model2) + 
+  coord_cartesian(ylim = c(40, 100)) +
+  scale_y_continuous(breaks = seq(45, 95, by = 10)) +
+  annotate("text", x = 2, y = 96,
+           label = paste0("\u03B2 = ", sprintf("%.2f", beta2), " [", sprintf("%.2f", ci2[1]), ", ", sprintf("%.2f", ci2[2]), "]"),
+           size = 2.5)
+
+p3 <- create_plot("max_hr_day", expression("Maximum pulse rate [min"^-1*"]"), model3) + 
+  coord_cartesian(ylim = c(50, 120)) +
+  scale_y_continuous(breaks = seq(55, 115, by = 10)) +
+  annotate("text", x = 2, y = 115.5,
+           label = paste0("\u03B2 = ", sprintf("%.2f", beta3), " [", sprintf("%.2f", ci3[1]), ", ", sprintf("%.2f", ci3[2]), "]"),
+           size = 2.5)
+
+# Combine plots in a row
+plot_grid(p1, p2, p3, align = "hv", ncol = 3)
+
+
+
+```
+```{r}
+library(ggpubr)
+library(cowplot)
+
+# Prepare dataset
+df_new <- df_oh_week0
+df_new$BpOrthStatEval <- factor(df_new$BpOrthStatEval, levels = c(0, 1), labels = c("OH-", "OH+"))
+
+# Fit linear models adjusted for covariates
+model1 <- lm(modal_hr_night ~ BpOrthStatEval + Age + Gender + PASE_score + beta_user, data = df_new)
+model2 <- lm(modal_hr_day ~ BpOrthStatEval + Age + Gender + PASE_score + beta_user, data = df_new)
+model3 <- lm(max_hr_day ~ BpOrthStatEval + Gender + PASE_score + beta_user, data = df_new)
+
+# Custom plot theme
+custom_theme <- theme(
+  axis.text = element_text(size = 10),
+  axis.title = element_text(size = 12),
+  legend.text = element_text(size = 10),
+  legend.title = element_text(size = 11),
+  plot.title = element_text(size = 13, face = "bold")
+)
+
+# Function to create boxplot with optional legend
+create_plot <- function(yvar, ylab, model, ylimit, ybreaks, annotation_y, show_legend = FALSE) {
+  beta <- coef(model)["BpOrthStatEvalOH+"]
+  ci <- confint(model)["BpOrthStatEvalOH+", ]
+  label <- paste0("\u03B2 = ", sprintf("%.2f", beta), 
+                  " [", sprintf("%.2f", ci[1]), ", ", sprintf("%.2f", ci[2]), "]")
+  
+  p <- ggboxplot(df_new, x = "BpOrthStatEval", y = yvar, 
+                 fill = "BpOrthStatEval", palette = "aaas", alpha = 0.3, outlier.shape = NA) +
+    labs(x = "", y = ylab) +
+    coord_cartesian(ylim = ylimit) +
+    scale_y_continuous(breaks = ybreaks) +
+    annotate("text", x = 1.8, y = annotation_y, label = label, size = 3.5) +
+    custom_theme
+  
+  if (!show_legend) {
+    p <- p + guides(fill = "none")
+  }
+  
+  return(p)
+}
+
+# Create the three plots
+p1 <- create_plot(
+  "modal_hr_night",
+  expression("Resting pulse rate night [min"^-1*"]"),
+  model1,
+  ylimit = c(40, 100),
+  ybreaks = seq(45, 95, 10),
+  annotation_y = 96
+)
+
+p2 <- create_plot(
+  "modal_hr_day",
+  expression("Resting pulse rate day [min"^-1*"]"),
+  model2,
+  ylimit = c(40, 100),
+  ybreaks = seq(45, 95, 10),
+  annotation_y = 96
+)
+
+p3 <- create_plot(
+  "max_hr_day",
+  expression("Maximum pulse rate [min"^-1*"]"),
+  model3,
+  ylimit = c(50, 130),
+  ybreaks = seq(55, 125, 10),
+  annotation_y = 125)
+
+# Combine all plots in a single row
+plot_grid(p1, p2, p3, align = "hv", ncol = 3)
+
+```
